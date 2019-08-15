@@ -4,6 +4,8 @@ can be used in other places in torch/ (namely torch.nn) without running into
 circular dependency problems
 """
 
+import threading
+import sys
 import inspect
 import weakref
 import torch._C
@@ -275,6 +277,50 @@ def _get_fn_overloads(qual_name):
 
 def _clear_fn_overloads(qual_name):
     del _overloaded_fns[qual_name]
+
+def get_class_name(method):
+    current_frame = sys._current_frames()[threading.currentThread().ident]
+
+    # one for the get_class_name call, one for _overload_method call
+    for i in range(2):
+        current_frame = current_frame.f_back
+    class_name = current_frame.f_code.co_name
+    return class_name
+
+# At the the point the decorator is applied to class methods the method
+# has no reference to its owning class. _qualified_name would not include
+# the class it is defined in, so any methods with the same name in the same file
+# would have the same _qualified_name, even if they were defined in different
+# classes. This problem only exists in python 2.
+# We get around this problem by looking at the stack frame and identifying
+# the class name.
+
+# qualified_name => class name => list[overload_functions]
+_overloaded_methods = {}  # noqa: T484
+
+def _overload_method(func):
+    qual_name = _qualified_name(func)
+    global _overloaded_methods
+    class_name_map = _overloaded_methods.get(qual_name, None)
+    if class_name_map is None:
+        class_name_map = {}
+        _overloaded_methods[qual_name] = class_name_map
+
+    class_name = get_class_name(func)
+    method_overloads = class_name_map.get(class_name, None)
+    if method_overloads is None:
+        method_overloads = []
+        class_name_map[class_name] = method_overloads
+
+    method_overloads.append(func)
+    return func
+
+def _get_overloaded_methods(method, class_name):
+    qual_name = _qualified_name(method)
+    class_name_map = _overloaded_methods.get(qual_name, None)
+    if class_name_map is None:
+        return None
+    return class_name_map.get(class_name, None)
 
 try:
     import typing
